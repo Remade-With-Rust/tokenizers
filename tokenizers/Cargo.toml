@@ -118,6 +118,8 @@ unstable_wasm = ["fancy-regex", "wasm"]
 # Oniguruma remade in pure Rust: same engine semantics as `onig`, no C in the
 # build, works on wasm32, and measured faster than libonig.
 rusty-expressions = ["dep:rusty_expressions"]
+# DEPLOY BRANCH ONLY: see above.
+onig = ["rusty-expressions"]
 rustls-tls = ["hf-hub?/rustls-tls"]
 parity-aware-bpe = []
 
