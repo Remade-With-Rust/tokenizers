@@ -2,16 +2,32 @@ pub(crate) mod cache;
 #[cfg(feature = "http")]
 pub(crate) mod from_pretrained;
 
-#[cfg(all(feature = "fancy-regex", not(feature = "onig")))]
+#[cfg(all(
+    feature = "fancy-regex",
+    not(feature = "onig"),
+    not(feature = "rusty-expressions")
+))]
 mod fancy;
-#[cfg(all(feature = "fancy-regex", not(feature = "onig")))]
+#[cfg(all(
+    feature = "fancy-regex",
+    not(feature = "onig"),
+    not(feature = "rusty-expressions")
+))]
 pub use fancy::SysRegex;
-#[cfg(feature = "onig")]
+#[cfg(feature = "rusty-expressions")]
+mod rusty;
+#[cfg(feature = "rusty-expressions")]
+pub use crate::utils::rusty::SysRegex;
+#[cfg(all(feature = "onig", not(feature = "rusty-expressions")))]
 mod onig;
-#[cfg(feature = "onig")]
+#[cfg(all(feature = "onig", not(feature = "rusty-expressions")))]
 pub use crate::utils::onig::SysRegex;
 
-#[cfg(not(any(feature = "onig", feature = "fancy-regex")))]
+#[cfg(not(any(
+    feature = "onig",
+    feature = "fancy-regex",
+    feature = "rusty-expressions"
+)))]
 compile_error!("One of the `onig`, or `fancy-regex` features must be enabled");
 
 pub mod iter;
