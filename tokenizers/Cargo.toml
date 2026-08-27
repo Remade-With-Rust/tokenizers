@@ -84,6 +84,8 @@ http = ["hf-hub"]
 wasm = ["getrandom/wasm_js"]
 unstable_wasm = ["fancy-regex", "wasm"]
 rusty-expressions = ["dep:rusty_expressions"]
+# DEPLOY BRANCH ONLY: see above.
+onig = ["rusty-expressions"]
 rustls-tls = ["hf-hub?/rustls-tls"]
 
 [dev-dependencies]
