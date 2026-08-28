@@ -51,7 +51,7 @@ rand = "0.9"
 # nothing in this graph can compile libonig. The `onig` FEATURE still exists
 # and redirects to the pure-Rust backend, so dependencies that hardcode it
 # (candle-core) keep resolving.
-rusty_expressions = { version = "0.1", default-features = false, optional = true }
+rusty_expressions = { version = "0.2", default-features = false, optional = true }
 regex = "1.10"
 regex-syntax = "0.8"
 rayon = "1.10"
