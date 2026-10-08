@@ -74,66 +74,112 @@ impl<'de> Deserialize<'de> for ModelWrapper {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        pub struct Tagged {
-            #[serde(rename = "type")]
-            variant: EnumType,
-            #[serde(flatten)]
-            rest: serde_json::Value,
-        }
-        #[derive(Deserialize)]
-        pub enum EnumType {
-            BPE,
-            WordPiece,
-            WordLevel,
-            Unigram,
-        }
+        // The common shape -- `"type"` first, as every serializer writes it -- is read straight
+        // into its model, a field at a time. Buffering the whole model into a `serde_json::Value`
+        // first (and, before that, into serde's untagged `Content`) cost a copy of every vocab
+        // entry and merge, several allocations each, on every load. Any other shape is buffered
+        // and read as before.
+        struct ModelVisitor;
+        impl<'de> serde::de::Visitor<'de> for ModelVisitor {
+            type Value = ModelWrapper;
 
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        pub enum ModelHelper {
-            Tagged(Tagged),
-            Legacy(serde_json::Value),
-        }
-
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        pub enum ModelUntagged {
-            BPE(BPE),
-            // WordPiece must stay before WordLevel here for deserialization (for retrocompatibility
-            // with the versions not including the "type"), since WordLevel is a subset of WordPiece
-            WordPiece(WordPiece),
-            WordLevel(WordLevel),
-            Unigram(Unigram),
-        }
-
-        let helper = ModelHelper::deserialize(deserializer)?;
-        Ok(match helper {
-            ModelHelper::Tagged(model) => match model.variant {
-                EnumType::BPE => ModelWrapper::BPE(
-                    serde_json::from_value(model.rest).map_err(serde::de::Error::custom)?,
-                ),
-                EnumType::WordPiece => ModelWrapper::WordPiece(
-                    serde_json::from_value(model.rest).map_err(serde::de::Error::custom)?,
-                ),
-                EnumType::WordLevel => ModelWrapper::WordLevel(
-                    serde_json::from_value(model.rest).map_err(serde::de::Error::custom)?,
-                ),
-                EnumType::Unigram => ModelWrapper::Unigram(
-                    serde_json::from_value(model.rest).map_err(serde::de::Error::custom)?,
-                ),
-            },
-            ModelHelper::Legacy(value) => {
-                let untagged = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                match untagged {
-                    ModelUntagged::BPE(bpe) => ModelWrapper::BPE(bpe),
-                    ModelUntagged::WordPiece(bpe) => ModelWrapper::WordPiece(bpe),
-                    ModelUntagged::WordLevel(bpe) => ModelWrapper::WordLevel(bpe),
-                    ModelUntagged::Unigram(bpe) => ModelWrapper::Unigram(bpe),
-                }
+            fn expecting(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(fmt, "a model")
             }
-        })
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<ModelWrapper, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                use serde::de::value::MapAccessDeserializer;
+                let mut buffered = serde_json::Map::new();
+                if let Some(key) = map.next_key::<String>()? {
+                    let value = if key == "type" {
+                        let variant: String = map.next_value()?;
+                        let rest = MapAccessDeserializer::new(&mut map);
+                        match variant.as_str() {
+                            "BPE" => return BPE::deserialize(rest).map(ModelWrapper::BPE),
+                            "WordPiece" => {
+                                return WordPiece::deserialize(rest).map(ModelWrapper::WordPiece)
+                            }
+                            "WordLevel" => {
+                                return WordLevel::deserialize(rest).map(ModelWrapper::WordLevel)
+                            }
+                            "Unigram" => {
+                                return Unigram::deserialize(rest).map(ModelWrapper::Unigram)
+                            }
+                            _ => {}
+                        }
+                        serde_json::Value::String(variant)
+                    } else {
+                        map.next_value()?
+                    };
+                    buffered.insert(key, value);
+                }
+                while let Some((key, value)) = map.next_entry()? {
+                    buffered.insert(key, value);
+                }
+                from_buffered(serde_json::Value::Object(buffered)).map_err(serde::de::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_map(ModelVisitor)
     }
+}
+
+/// A model buffered whole: tagged (`"type"` anywhere) or legacy (no `"type"`).
+fn from_buffered(value: serde_json::Value) -> serde_json::Result<ModelWrapper> {
+    #[derive(Deserialize)]
+    pub struct Tagged {
+        #[serde(rename = "type")]
+        variant: EnumType,
+        #[serde(flatten)]
+        rest: serde_json::Value,
+    }
+    #[derive(Deserialize)]
+    pub enum EnumType {
+        BPE,
+        WordPiece,
+        WordLevel,
+        Unigram,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    pub enum ModelHelper {
+        Tagged(Tagged),
+        Legacy(serde_json::Value),
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    pub enum ModelUntagged {
+        BPE(BPE),
+        // WordPiece must stay before WordLevel here for deserialization (for retrocompatibility
+        // with the versions not including the "type"), since WordLevel is a subset of WordPiece
+        WordPiece(WordPiece),
+        WordLevel(WordLevel),
+        Unigram(Unigram),
+    }
+
+    let helper: ModelHelper = serde_json::from_value(value)?;
+    Ok(match helper {
+        ModelHelper::Tagged(model) => match model.variant {
+            EnumType::BPE => ModelWrapper::BPE(serde_json::from_value(model.rest)?),
+            EnumType::WordPiece => ModelWrapper::WordPiece(serde_json::from_value(model.rest)?),
+            EnumType::WordLevel => ModelWrapper::WordLevel(serde_json::from_value(model.rest)?),
+            EnumType::Unigram => ModelWrapper::Unigram(serde_json::from_value(model.rest)?),
+        },
+        ModelHelper::Legacy(value) => {
+            let untagged = serde_json::from_value(value)?;
+            match untagged {
+                ModelUntagged::BPE(bpe) => ModelWrapper::BPE(bpe),
+                ModelUntagged::WordPiece(bpe) => ModelWrapper::WordPiece(bpe),
+                ModelUntagged::WordLevel(bpe) => ModelWrapper::WordLevel(bpe),
+                ModelUntagged::Unigram(bpe) => ModelWrapper::Unigram(bpe),
+            }
+        }
+    })
 }
 
 impl_enum_from!(WordLevel, ModelWrapper, WordLevel);
@@ -347,11 +393,31 @@ mod tests {
         let reconstructed = serde_json::from_str(legacy).unwrap();
         assert_eq!(model, reconstructed);
 
+        // `"type"` not first: buffered, read as before.
+        let late = r#"{"vocab":{"<unk>":0,"a":1,"b":2,"ab":3},"unk_token":"<unk>","ignore_merges":true,"type":"BPE","merges":[["a","b"]]}"#;
+        let reconstructed = serde_json::from_str(late).unwrap();
+        assert_eq!(model, reconstructed);
+
+        // Legacy lines: a `#version` line is skipped.
+        let versioned = r##"{"type":"BPE","unk_token":"<unk>","ignore_merges":true,"vocab":{"<unk>":0,"a":1,"b":2,"ab":3},"merges":["#version: 0.2","a b"]}"##;
+        let reconstructed = serde_json::from_str(versioned).unwrap();
+        assert_eq!(model, reconstructed);
+
+        // One form or the other, not both.
+        let mixed = r#"{"type":"BPE","unk_token":"<unk>","vocab":{"<unk>":0,"a":1,"b":2,"ab":3},"merges":["a b",["a","b"]]}"#;
+        assert!(serde_json::from_str::<ModelWrapper>(mixed).is_err());
+
         let invalid = r#"{"type":"BPE","dropout":null,"unk_token":"<unk>","continuing_subword_prefix":null,"end_of_word_suffix":null,"fuse_unk":false,"byte_fallback":false,"ignore_merges":true,"vocab":{"<unk>":0,"a":1,"b":2,"ab":3},"merges":["a b c"]}"#;
         let reconstructed: std::result::Result<ModelWrapper, serde_json::Error> =
             serde_json::from_str(invalid);
         match reconstructed {
-            Err(err) => assert_eq!(err.to_string(), "Merges text file invalid at line 1"),
+            // Read straight from the text, the error carries its position there.
+            Err(err) => assert!(
+                err.to_string()
+                    .starts_with("Merges text file invalid at line 1"),
+                "{}",
+                err
+            ),
             _ => panic!("Expected an error here"),
         }
     }

@@ -1,7 +1,7 @@
-use super::{super::OrderedVocabIter, convert_merges_to_hashmap, BpeBuilder, Pair, BPE};
+use super::{super::OrderedVocabIter, BpeBuilder, Error as BpeError, Merges, Pair, BPE};
 use ahash::AHashMap;
 use serde::{
-    de::{Error, MapAccess, Visitor},
+    de::{Error, MapAccess, SeqAccess, Visitor},
     ser::SerializeStruct,
     Deserialize, Deserializer, Serialize, Serializer,
 };
@@ -81,14 +81,7 @@ impl<'de> Visitor<'de> for BPEVisitor {
     {
         let mut builder = BpeBuilder::new();
         let mut vocab: Option<AHashMap<String, u32>> = None;
-
-        #[derive(Debug, Deserialize)]
-        #[serde(untagged)]
-        enum MergeType {
-            Tuple(Vec<(String, String)>),
-            Legacy(Vec<String>),
-        }
-        let mut merges: Option<MergeType> = None;
+        let mut merges: Option<MergesIn> = None;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_ref() {
                 "dropout" => {
@@ -140,18 +133,112 @@ impl<'de> Visitor<'de> for BPEVisitor {
                 _ => {}
             }
         }
-        if let (Some(vocab), Some(merges)) = (vocab, merges) {
-            let merges = match merges {
-                MergeType::Tuple(merges) => merges,
-                MergeType::Legacy(merges) => {
-                    convert_merges_to_hashmap(merges.into_iter(), &vocab).map_err(Error::custom)?
-                }
-            };
+        if let (Some(vocab), Some(MergesIn(merges))) = (vocab, merges) {
             builder = builder.vocab_and_merges(vocab, merges);
             Ok(builder.build().map_err(Error::custom)?)
         } else {
             Err(Error::custom("Missing vocab/merges"))
         }
+    }
+}
+
+/// The merges, as pairs (`[["a", "b"], ...]`) or as legacy lines (`["a b", ...]`, `#version`
+/// lines skipped), read one at a time. An untagged enum over the two forms buffered the whole list
+/// into serde's `Content` first, and a legacy line was kept whole before it was split.
+struct MergesIn(Merges);
+
+impl<'de> Deserialize<'de> for MergesIn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(MergesVisitor)
+    }
+}
+
+struct MergesVisitor;
+impl<'de> Visitor<'de> for MergesVisitor {
+    type Value = MergesIn;
+
+    fn expecting(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(fmt, "a list of merges")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<MergesIn, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut merges = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        // Every entry of one form: the first decides.
+        let mut legacy = None;
+        while let Some(merge) = seq.next_element::<Merge>()? {
+            let is_line = !matches!(merge, Merge::Pair(..));
+            if *legacy.get_or_insert(is_line) != is_line {
+                return Err(Error::custom("merges mix pairs and lines"));
+            }
+            match merge {
+                Merge::Pair(a, b) => merges.push((a, b)),
+                Merge::Version => {}
+                Merge::Line(Some(pair)) => merges.push(pair),
+                Merge::Line(None) => {
+                    return Err(Error::custom(BpeError::BadMerges(merges.len() + 1)));
+                }
+            }
+        }
+        Ok(MergesIn(merges))
+    }
+}
+
+/// One merge: a pair, or a legacy line split in two (`None`: not two parts).
+enum Merge {
+    Pair(String, String),
+    Line(Option<(String, String)>),
+    Version,
+}
+
+impl<'de> Deserialize<'de> for Merge {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct MergeVisitor;
+        impl<'de> Visitor<'de> for MergeVisitor {
+            type Value = Merge;
+
+            fn expecting(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(fmt, "a merge: a pair of strings, or a string")
+            }
+
+            fn visit_str<E: Error>(self, line: &str) -> Result<Merge, E> {
+                if line.starts_with("#version") {
+                    return Ok(Merge::Version);
+                }
+                let mut parts = line.split(' ');
+                Ok(Merge::Line(
+                    match (parts.next(), parts.next(), parts.next()) {
+                        (Some(a), Some(b), None) => Some((a.to_owned(), b.to_owned())),
+                        _ => None,
+                    },
+                ))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Merge, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let a = seq
+                    .next_element()?
+                    .ok_or_else(|| Error::invalid_length(0, &self))?;
+                let b = seq
+                    .next_element()?
+                    .ok_or_else(|| Error::invalid_length(1, &self))?;
+                if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(Error::invalid_length(3, &self));
+                }
+                Ok(Merge::Pair(a, b))
+            }
+        }
+        deserializer.deserialize_any(MergeVisitor)
     }
 }
 

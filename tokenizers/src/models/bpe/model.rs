@@ -171,6 +171,8 @@ impl BpeBuilder {
         } else {
             0
         };
+        // Each merged token formed in one reused buffer, not a new `String` a merge.
+        let mut new_token = String::new();
         let merge_map: MergeMap = self
             .config
             .merges
@@ -183,10 +185,12 @@ impl BpeBuilder {
                 let b_id = vocab
                     .get(&b)
                     .ok_or_else(|| Error::MergeTokenOutOfVocabulary(b.to_owned()))?;
-                let new_token = format!("{}{}", a, &b[prefix_len..]);
+                new_token.clear();
+                new_token.push_str(&a);
+                new_token.push_str(&b[prefix_len..]);
                 let new_id = vocab
                     .get(&new_token)
-                    .ok_or(Error::MergeTokenOutOfVocabulary(new_token))?;
+                    .ok_or_else(|| Error::MergeTokenOutOfVocabulary(new_token.clone()))?;
                 Ok(((*a_id, *b_id), (i as u32, *new_id)))
             })
             .collect::<Result<MergeMap>>()?;
